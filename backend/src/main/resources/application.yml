@@ -10,7 +10,7 @@ spring:
   application:
     name: doc-format-check
   profiles:
-    active: ${SPRING_PROFILES_ACTIVE:dev}
+    active: ${SPRING_PROFILES_ACTIVE:prod}
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:doc_format_check}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
@@ -23,6 +23,7 @@ spring:
       # 小于 MySQL wait_timeout，避免连接被服务端回收后仍被连接池复用
       max-lifetime: 300000
       keepalive-time: 60000
+      idle-timeout: 240000
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}

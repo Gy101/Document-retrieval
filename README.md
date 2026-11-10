@@ -290,7 +290,7 @@ server {
 
 ## 7. 配置说明
 
-主配置：`backend/src/main/resources/application.yml`；开发覆盖：`application-dev.yml`。所有关键项均支持环境变量。
+主配置：`backend/src/main/resources/application.yml`；开发覆盖：`application-dev.yml`。默认 profile 为 `prod`（INFO 日志），本地开发用 `SPRING_PROFILES_ACTIVE=dev` 开启 DEBUG 与开发数据库覆盖。所有关键项均支持环境变量。
 
 ### 7.1 数据库与 Redis
 
@@ -374,6 +374,7 @@ java -jar target/doc-check-server-1.0.0.jar
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
+| `SPRING_PROFILES_ACTIVE` | `prod` | 运行 profile；本地开发设为 `dev` |
 | `AUTH_TRUST_PROXY` | `false` | 是否信任 X-Forwarded-For / X-Real-IP；仅在可信反向代理后开启 |
 | `DEMO_USERNAME` | `admin` | 首次启动创建的管理员账号 |
 | `DEMO_PASSWORD` | `admin123` | 首次启动创建的管理员密码 |
