@@ -871,7 +871,7 @@ mysql -u doccheck -p doc_format_check < backend/src/main/resources/db/upgrade-20
 - **线程池隔离**：`parseExecutor` 负责 DOCX 解析，`dshExecutor` 负责模型调用，避免慢模型请求占满解析线程；解析超时 120 秒、模型超时 180 秒。
 - **文件与解析复用**：任务落盘前计算 SHA-256；同指纹文档复用已存文件和 v6 解析元数据，减少重复上传与解析。
 - **详情载荷优化**：默认 `GET /api/tasks/{id}` 使用 light 模式，只返回任务统计；文档元数据和差异通过独立接口懒加载，差异首批 200 条、后台续拉，服务端支持严重等级/类型/关键词过滤。
-- **组件拆分**：批注面板、差异面板、解析格式工具、预览样式已分别抽为 `DocumentCommentPanel.vue`、`TaskDiffPanel.vue`、`DocxFormatSupport.java`、`DocumentPreview.css`；`TaskDetailView.vue` 约 700 行、`DocumentPreview.vue` 约 950 行。
+- **组件拆分**：批注面板、差异面板、预览样式已分别抽为 `DocumentCommentPanel.vue`、`TaskDiffPanel.vue`、`DocumentPreview.css`；解析器拆出 `DocxFormatSupport.java`、`DocxRunParser.java`、`DocxStyleSupport.java`。当前 `TaskDetailView.vue` 约 720 行、`DocumentPreview.vue` 约 950 行、`DocxParser.java` 约 990 行。
 - **测试**：`mvn test` 当前 11 个用例，覆盖 DOCX 安全、登录限流、任务终态、文件哈希、实例队列。
 
 ---
@@ -889,6 +889,8 @@ mysql -u doccheck -p doc_format_check < backend/src/main/resources/db/upgrade-20
 | `backend/src/main/resources/db/upgrade-20261111.sql` | 已有数据库升级脚本 |
 | `backend/src/main/resources/prompts/format-check-system.txt` | 固定系统提示词 |
 | `backend/src/main/java/com/doccheck/parser/DocxFormatSupport.java` | 解析格式换算工具 |
+| `backend/src/main/java/com/doccheck/parser/DocxRunParser.java` | Run 字符格式与字体继承解析 |
+| `backend/src/main/java/com/doccheck/parser/DocxStyleSupport.java` | 文档样式元数据解析 |
 | `backend/src/main/java/com/doccheck/service/CheckTaskWatchdog.java` | RUNNING 任务超时看门狗 |
 | `backend/src/main/java/com/doccheck/service/DocxSecurityValidator.java` | DOCX 魔数与 Zip 炸弹防护 |
 | `backend/src/main/java/com/doccheck/service/storage/FileHashes.java` | 文件 SHA-256 指纹 |

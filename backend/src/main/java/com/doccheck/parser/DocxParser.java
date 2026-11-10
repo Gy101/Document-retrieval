@@ -56,8 +56,7 @@ public class DocxParser {
     }
 
     /** Run 的最终字体，包含决定中文标点走向的 w:hint。 */
-    private record RunFonts(String eastAsia, String ascii, String hAnsi, String hint) {
-    }
+
 
     /** 解析本地文件。 */
     public DocumentMeta parse(Path path, String fileName) throws IOException {
@@ -149,7 +148,7 @@ public class DocxParser {
 
         List<HeaderFooterMeta> headers = parseHeaderFooters(doc.getHeaderList(), "HEADER", images, notes);
         List<HeaderFooterMeta> footers = parseHeaderFooters(doc.getFooterList(), "FOOTER", images, notes);
-        DocumentStylesMeta styles = parseStyles(doc);
+        DocumentStylesMeta styles = DocxStyleSupport.parse(doc);
 
         int characterCount = sections.stream()
                 .flatMap(s -> s.getBlocks().stream())
@@ -250,7 +249,7 @@ public class DocxParser {
         boolean pageNumberField = false;
 
         for (XWPFRun run : p.getRuns()) {
-            RunMeta runMeta = parseRun(p, run, runIndex++);
+            RunMeta runMeta = DocxRunParser.parse(p, run, runIndex++);
             runs.add(runMeta);
             if (firstFont == null) {
                 firstFont = runMeta.getFontEastAsia();
@@ -313,131 +312,6 @@ public class DocxParser {
                 .hasCjkPunctuation(hasCjkPunctuation(text))
                 .hasPageNumberField(pageNumberField)
                 .build();
-    }
-
-    private RunMeta parseRun(XWPFParagraph p, XWPFRun run, int index) {
-        CTRPr rPr = run.getCTR().getRPr();
-        Double fontSize = null;
-
-        // 字体同样需要沿“直接格式 → 字符样式 → 段落样式 → Normal”继承，
-        // 否则大量只依赖默认正文样式的 Run 会得到 null，无法判断引号实际使用哪套字体。
-        RunFonts fonts = effectiveRunFonts(p, run);
-        try {
-            fontSize = run.getFontSizeAsDouble();
-        } catch (RuntimeException ignored) {
-            // 某些文档的 w:sz 非法时 POI 会抛异常，保留 null 交给模型判断
-        }
-
-        Double characterSpacing = null;
-        Double kerning = null;
-        Double position = null;
-        String highlight = null;
-        if (rPr != null) {
-            // POI 5.2.x 的 CTRPr 对可重复属性只暴露 List / Array 形式，取第一个即可。
-            CTSignedTwipsMeasure spacing = first(rPr.getSpacingList());
-            if (spacing != null) {
-                characterSpacing = twipsToPt(spacing.getVal());
-            }
-            CTHpsMeasure kern = first(rPr.getKernList());
-            if (kern != null) {
-                kerning = twipsToPt(kern.getVal());
-            }
-            CTSignedHpsMeasure pos = first(rPr.getPositionList());
-            if (pos != null) {
-                // w:position 的单位是 half-point
-                position = halfPointsToPt(pos.getVal());
-            }
-            CTHighlight hl = first(rPr.getHighlightList());
-            if (hl != null && hl.getVal() != null) {
-                highlight = hl.getVal().toString().toLowerCase(Locale.ROOT);
-            }
-        }
-
-        return RunMeta.builder()
-                .index(index)
-                .text(run.text())
-                .styleId(run.getStyle())
-                .fontEastAsia(fonts.eastAsia())
-                .fontAscii(fonts.ascii())
-                .fontHAnsi(fonts.hAnsi())
-                .fontHint(fonts.hint())
-                .fontSizePt(fontSize)
-                .bold(run.isBold())
-                .italic(run.isItalic())
-                .underline(run.getUnderline() == null ? "none" : run.getUnderline().toString().toLowerCase(Locale.ROOT))
-                .strike(run.isStrikeThrough())
-                .color(run.getColor())
-                .highlight(highlight)
-                .characterSpacingPt(characterSpacing)
-                .kerningPt(kerning)
-                .positionPt(position)
-                .smallCaps(run.isSmallCaps())
-                .allCaps(run.isCapitalized())
-                .hidden(run.isVanish())
-                .verticalAlign(run.getVerticalAlignment() == null ? null
-                        : run.getVerticalAlignment().toString().toLowerCase(Locale.ROOT))
-                .build();
-    }
-
-    private RunFonts effectiveRunFonts(XWPFParagraph p, XWPFRun run) {
-        List<CTRPr> chain = new ArrayList<>();
-        if (run.getCTR() != null && run.getCTR().getRPr() != null) {
-            chain.add(run.getCTR().getRPr());
-        }
-        XWPFDocument doc = p.getDocument();
-        XWPFStyles styles = doc == null ? null : doc.getStyles();
-        Set<String> seen = new LinkedHashSet<>();
-        if (styles != null) {
-            addStyleRunProperties(styles, run.getStyle(), chain, seen);
-            String paragraphStyle = p.getStyleID() != null ? p.getStyleID() : p.getStyle();
-            addStyleRunProperties(styles, paragraphStyle, chain, seen);
-
-            XWPFStyle normal = styles.getStyle("Normal");
-            if (normal == null) {
-                normal = styles.getStyleWithName("Normal");
-            }
-            addStyleRunProperties(styles, normal, chain, seen);
-        }
-
-        String eastAsia = null;
-        String ascii = null;
-        String hAnsi = null;
-        String hint = null;
-        for (CTRPr rPr : chain) {
-            CTFonts fonts = first(rPr.getRFontsList());
-            if (fonts == null) {
-                continue;
-            }
-            if (eastAsia == null) {
-                eastAsia = fonts.getEastAsia();
-            }
-            if (ascii == null) {
-                ascii = fonts.getAscii();
-            }
-            if (hAnsi == null) {
-                hAnsi = fonts.getHAnsi();
-            }
-            if (hint == null && fonts.getHint() != null) {
-                hint = fonts.getHint().toString();
-            }
-        }
-        return new RunFonts(eastAsia, ascii, hAnsi, hint);
-    }
-
-    private void addStyleRunProperties(XWPFStyles styles, String styleId,
-                                       List<CTRPr> chain, Set<String> seen) {
-        addStyleRunProperties(styles, styleId == null ? null : styles.getStyle(styleId), chain, seen);
-    }
-
-    private void addStyleRunProperties(XWPFStyles styles, XWPFStyle style,
-                                       List<CTRPr> chain, Set<String> seen) {
-        while (style != null && style.getStyleId() != null && seen.add(style.getStyleId())) {
-            if (style.getCTStyle() != null && style.getCTStyle().getRPr() != null) {
-                chain.add(style.getCTStyle().getRPr());
-            }
-            String basedOn = style.getBasisStyleID();
-            style = basedOn == null ? null : styles.getStyle(basedOn);
-        }
     }
 
     private String anchorWrapType(CTAnchor anchor) {
@@ -701,124 +575,6 @@ public class DocxParser {
             return "even";
         }
         return index % 3 == 1 ? "first" : index % 3 == 2 ? "even" : "default";
-    }
-
-    private DocumentStylesMeta parseStyles(XWPFDocument doc) {
-        XWPFStyles styles = doc.getStyles();
-        if (styles == null) {
-            return null;
-        }
-        String eastAsia = null;
-        String ascii = null;
-        Double size = null;
-        // XWPFDefaultRunStyle 在 POI 5.2.5 仅暴露字号，不提供按 FontCharRange 取字体。
-        if (styles.getDefaultRunStyle() != null) {
-            XWPFDefaultRunStyle runStyle = styles.getDefaultRunStyle();
-            size = runStyle.getFontSizeAsDouble();
-        }
-
-        // POI 5.2.x 的 XWPFStyles 不暴露「全部样式列表」，这里从正文/表格/页眉页脚实际
-        // 使用到的 styleId 反查 XWPFStyle，既能覆盖真实格式，也避免反射内部结构。
-        Set<String> styleIds = new LinkedHashSet<>();
-        collectParagraphStyleIds(doc.getParagraphs(), styleIds);
-        for (XWPFTable table : doc.getTables()) {
-            for (XWPFTableRow row : table.getRows()) {
-                for (XWPFTableCell cell : row.getTableCells()) {
-                    collectParagraphStyleIds(cell.getParagraphs(), styleIds);
-                }
-            }
-        }
-        for (XWPFHeaderFooter hf : doc.getHeaderList()) {
-            collectParagraphStyleIds(hf.getParagraphs(), styleIds);
-        }
-        for (XWPFHeaderFooter hf : doc.getFooterList()) {
-            collectParagraphStyleIds(hf.getParagraphs(), styleIds);
-        }
-        if (styleIds.isEmpty()) {
-            styleIds.add("Normal");
-        }
-
-        List<StyleMeta> paragraphStyles = new ArrayList<>();
-        for (String styleId : styleIds) {
-            XWPFStyle style = styles.getStyle(styleId);
-            if (style == null) {
-                continue;
-            }
-            try {
-                CTStyle ct = style.getCTStyle();
-                String type = ct.getType() == null ? "" : ct.getType().toString().toLowerCase(Locale.ROOT);
-                Double styleSize = null;
-                String styleEastAsia = null;
-                String styleAscii = null;
-                Boolean bold = null;
-                String alignment = null;
-                Double firstLine = null;
-                Double lineSpacing = null;
-                CTRPr rPr = ct.getRPr();
-                if (rPr != null) {
-                    CTFonts fonts = first(rPr.getRFontsList());
-                    if (fonts != null) {
-                        styleEastAsia = fonts.getEastAsia();
-                        styleAscii = fonts.getAscii();
-                    }
-                    CTHpsMeasure sz = first(rPr.getSzList());
-                    if (sz != null) {
-                        styleSize = halfPointsToPt(sz.getVal());
-                    }
-                    CTOnOff b = first(rPr.getBList());
-                    if (b != null) {
-                        Object value = b.getVal();
-                        bold = value == null || Boolean.parseBoolean(value.toString());
-                    }
-                }
-                if (ct.getPPr() != null) {
-                    if (ct.getPPr().getJc() != null && ct.getPPr().getJc().getVal() != null) {
-                        alignment = ct.getPPr().getJc().getVal().toString().toLowerCase(Locale.ROOT);
-                    }
-                    if (ct.getPPr().getInd() != null && ct.getPPr().getInd().getFirstLine() != null) {
-                        firstLine = twipsToPt(ct.getPPr().getInd().getFirstLine());
-                    }
-                    if (ct.getPPr().getSpacing() != null && ct.getPPr().getSpacing().getLine() != null) {
-                        lineSpacing = asDouble(ct.getPPr().getSpacing().getLine()) / 240.0;
-                    }
-                }
-                if (!"paragraph".equals(type) && !"character".equals(type) && !"table".equals(type)) {
-                    continue;
-                }
-                paragraphStyles.add(StyleMeta.builder()
-                        .id(style.getStyleId())
-                        .name(style.getName())
-                        .type(type)
-                        .basedOn(style.getBasisStyleID())
-                        .fontEastAsia(styleEastAsia)
-                        .fontAscii(styleAscii)
-                        .fontSizePt(styleSize)
-                        .bold(bold)
-                        .alignment(alignment)
-                        .firstLinePt(firstLine)
-                        .lineSpacingLines(lineSpacing)
-                        .build());
-            } catch (RuntimeException ignored) {
-                // 单条样式异常不影响文档整体解析
-            }
-        }
-        return DocumentStylesMeta.builder()
-                .defaultFontEastAsia(eastAsia)
-                .defaultFontAscii(ascii)
-                .defaultFontSizePt(size)
-                .paragraphStyles(paragraphStyles)
-                .build();
-    }
-
-    private void collectParagraphStyleIds(List<XWPFParagraph> paragraphs, Set<String> target) {
-        if (paragraphs == null) {
-            return;
-        }
-        for (XWPFParagraph paragraph : paragraphs) {
-            if (paragraph.getStyleID() != null && !paragraph.getStyleID().isBlank()) {
-                target.add(paragraph.getStyleID());
-            }
-        }
     }
 
     private PageSetupMeta parsePageSetup(CTSectPr sectPr) {
