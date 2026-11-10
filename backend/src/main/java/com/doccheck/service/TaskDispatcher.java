@@ -42,6 +42,7 @@ public class TaskDispatcher {
     public void recover() {
         try {
             queueService.recoverProcessing();
+            queueService.recoverOrphaned();
         } catch (Exception e) {
             log.warn("恢复队列失败（Redis 可能尚未就绪）", e);
         }

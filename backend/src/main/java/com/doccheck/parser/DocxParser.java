@@ -9,13 +9,21 @@ import org.openxmlformats.schemas.drawingml.x2006.wordprocessingDrawing.CTAnchor
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
+
+import static com.doccheck.parser.DocxFormatSupport.asDouble;
+import static com.doccheck.parser.DocxFormatSupport.colorHex;
+import static com.doccheck.parser.DocxFormatSupport.emuToPt;
+import static com.doccheck.parser.DocxFormatSupport.first;
+import static com.doccheck.parser.DocxFormatSupport.halfPointsToPt;
+import static com.doccheck.parser.DocxFormatSupport.hasCjkPunctuation;
+import static com.doccheck.parser.DocxFormatSupport.isFullWidth;
+import static com.doccheck.parser.DocxFormatSupport.twipsToPt;
 
 import org.springframework.stereotype.Component;
 
@@ -1151,27 +1159,6 @@ public class DocxParser {
         return val + (fill == null ? "" : " " + fill);
     }
 
-    /**
-     * XmlBeans 对 STHexColor 的 getFill() 返回 byte[]，直接 String.valueOf 会得到 [B@xxx。
-     * 这里统一转成大写十六进制颜色；auto/空值返回 null，表示无显式底纹。
-     */
-    private String colorHex(Object value) {
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof byte[] bytes) {
-            if (bytes.length == 0) {
-                return null;
-            }
-            return HexFormat.of().withUpperCase().formatHex(bytes);
-        }
-        String text = String.valueOf(value).trim();
-        if (text.isEmpty() || "auto".equalsIgnoreCase(text)) {
-            return null;
-        }
-        return text.toUpperCase(Locale.ROOT);
-    }
-
     private Integer outlineLevel(CTPPr pPr) {
         if (pPr == null || pPr.getOutlineLvl() == null || pPr.getOutlineLvl().getVal() == null) {
             return null;
@@ -1228,22 +1215,6 @@ public class DocxParser {
         return false;
     }
 
-    private boolean hasCjkPunctuation(String text) {
-        String punctuation = "，。；：！？、（）《》“”‘’【】…—";
-        for (int i = 0; i < text.length(); i++) {
-            if (punctuation.indexOf(text.charAt(i)) >= 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isFullWidth(int cp) {
-        return Character.isIdeographic(cp)
-                || (cp >= 0x3000 && cp <= 0x303F)
-                || (cp >= 0xFF00 && cp <= 0xFFEF);
-    }
-
     private int tableTextLength(TableMeta table) {
         if (table == null || table.getRows() == null) {
             return 0;
@@ -1257,46 +1228,5 @@ public class DocxParser {
             }
         }
         return length;
-    }
-
-    private static <T> T first(List<T> values) {
-        return values == null || values.isEmpty() ? null : values.get(0);
-    }
-
-    /** XMLBeans 的 union 类型 getter 常返回 Object，统一转 double。 */
-    static double asDouble(Object value) {
-        if (value == null) {
-            return 0;
-        }
-        if (value instanceof Number number) {
-            return number.doubleValue();
-        }
-        try {
-            return new BigDecimal(value.toString()).doubleValue();
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    static double twipsToPt(BigInteger value) {
-        return value == null ? 0 : value.doubleValue() / 20.0;
-    }
-
-    static double twipsToPt(int value) {
-        return value / 20.0;
-    }
-
-    /** 兼容 CTSignedTwipsMeasure / CTTwipsMeasure 等返回 Object 的字段。 */
-    static double twipsToPt(Object value) {
-        return asDouble(value) / 20.0;
-    }
-
-    /** half-point（w:sz / w:position）转 pt。 */
-    static double halfPointsToPt(Object value) {
-        return asDouble(value) / 2.0;
-    }
-
-    static double emuToPt(long value) {
-        return value / 12700.0;
     }
 }

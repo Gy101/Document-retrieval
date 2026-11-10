@@ -18,6 +18,7 @@ import com.doccheck.mapper.CheckDiffMapper;
 import com.doccheck.mapper.CheckTaskMapper;
 import com.doccheck.parser.DocxParser;
 import com.doccheck.parser.model.DocumentMeta;
+import com.doccheck.service.storage.FileHashes;
 import com.doccheck.service.storage.StorageService;
 import com.doccheck.service.storage.StoredFile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -79,7 +80,10 @@ public class TaskService {
         securityValidator.validate(file);
         Long userId = UserContext.userId();
 
-        StoredFile stored = storageService.store(file, "document");
+        // 先算指纹：相同内容只落盘一次，并复用历史解析缓存。
+        String hash = FileHashes.sha256(file);
+        StoredFile stored = reuseOrStore(file, hash, originalName);
+
         CheckTask task = new CheckTask();
         task.setTaskNo(generateTaskNo());
         task.setUserId(userId);
@@ -114,6 +118,25 @@ public class TaskService {
         return new CreateTaskResponse(task.getId(), task.getTaskNo(), task.getStatus(), task.getProgress());
     }
 
+    private StoredFile reuseOrStore(MultipartFile file, String hash, String originalName) {
+        CheckTask reusable = taskMapper.selectReusableFile(hash);
+        if (reusable != null && StringUtils.hasText(reusable.getDocPath())) {
+            try {
+                Path existing = storageService.resolve(reusable.getDocPath());
+                if (Files.exists(existing)) {
+                    log.info("复用同指纹任务文件: task={}, hash={}", reusable.getId(), hash);
+                    String contentType = file.getContentType() == null
+                            ? "application/octet-stream" : file.getContentType();
+                    return new StoredFile(reusable.getDocPath(), StringUtils.cleanPath(originalName),
+                            file.getSize(), hash, contentType);
+                }
+            } catch (RuntimeException e) {
+                log.warn("历史文件不可复用，重新落盘: {}", e.getMessage());
+            }
+        }
+        return storageService.store(file, "document");
+    }
+
     public PageResult<TaskVO> list(long page, long size, String status) {
         var query = Wrappers.<CheckTask>lambdaQuery();
         if (!UserContext.isAdmin()) {
@@ -133,29 +156,89 @@ public class TaskService {
     }
 
     public TaskDetailVO detail(Long id) {
+        return detail(id, false);
+    }
+
+    /** light=true 时只返回任务基础信息，元数据与差异走独立接口，避免大任务详情响应过重。 */
+    public TaskDetailVO detail(Long id, boolean light) {
         CheckTask task = requireOwned(id);
         TaskDetailVO vo = new TaskDetailVO();
         copyBase(task, vo);
+        vo.setCustomRules(task.getCustomRules());
+        if (!light) {
+            vo.setDocument(loadDocument(task));
+            vo.setDiffs(loadDiffs(id, null, null, null).stream().map(this::toVO).toList());
+        }
+        return vo;
+    }
+
+    /** 文档格式元数据（含批注/图片锚点），按任务懒加载。 */
+    public JsonNode documentMetadata(Long id) {
+        return loadDocument(requireOwned(id));
+    }
+
+    /**
+     * 差异分页：兼容旧版全量详情，同时支持按严重等级/类型/关键词过滤。
+     * 关键词搜索覆盖位置、片段、模板值、实际值与建议。
+     */
+    public PageResult<DiffVO> diffPage(Long id, long page, long size, String severity,
+                                       String type, String keyword) {
+        requireOwned(id);
+        long current = Math.max(1, page);
+        long limit = Math.min(Math.max(1, size), 200);
+        List<CheckDiff> rows = loadDiffs(id, severity, type, keyword);
+        int from = (int) Math.min((current - 1) * limit, rows.size());
+        int to = (int) Math.min(from + limit, rows.size());
+        List<DiffVO> items = rows.subList(from, to).stream().map(this::toVO).toList();
+        return PageResult.of(items, rows.size(), current, limit);
+    }
+
+    /** 过滤下拉可用的差异类型。 */
+    public List<String> diffTypes(Long id) {
+        requireOwned(id);
+        return diffMapper.selectList(Wrappers.<CheckDiff>lambdaQuery()
+                        .eq(CheckDiff::getTaskId, id)
+                        .select(CheckDiff::getDiffType))
+                .stream().map(CheckDiff::getDiffType).filter(StringUtils::hasText)
+                .distinct().sorted().toList();
+    }
+
+    private JsonNode loadDocument(CheckTask task) {
         JsonNode document = null;
         if (StringUtils.hasText(task.getDocumentMetadata())) {
             try {
                 document = objectMapper.readTree(task.getDocumentMetadata());
             } catch (Exception e) {
-                log.warn("任务 {} 文档元数据 JSON 损坏", id, e);
+                log.warn("任务 {} 文档元数据 JSON 损坏", task.getId(), e);
             }
         }
-        // 旧任务的元数据没有图片容器/批注等字段，读取详情时补一次解析并回写，
-        // 让历史任务无需重新校验也能正确显示图片/批注，后续请求直接复用新元数据。
         if (document != null && document.path("metadataVersion").asInt(0) < 6) {
             document = refreshDocumentMetadata(task, document);
         }
-        vo.setDocument(document);
-        List<CheckDiff> diffs = diffMapper.selectList(Wrappers.<CheckDiff>lambdaQuery()
-                .eq(CheckDiff::getTaskId, id)
-                .orderByAsc(CheckDiff::getSeq));
-        vo.setDiffs(diffs.stream().map(this::toVO).toList());
-        vo.setCustomRules(task.getCustomRules());
-        return vo;
+        return document;
+    }
+
+    private List<CheckDiff> loadDiffs(Long id, String severity, String type, String keyword) {
+        var query = Wrappers.<CheckDiff>lambdaQuery().eq(CheckDiff::getTaskId, id);
+        if (StringUtils.hasText(severity)) {
+            String value = severity.trim().toLowerCase();
+            if (Severity.HIGH.equals(value) || Severity.MIDDLE.equals(value) || Severity.LOW.equals(value)) {
+                query.eq(CheckDiff::getSeverity, value);
+            }
+        }
+        if (StringUtils.hasText(type)) {
+            query.eq(CheckDiff::getDiffType, type.trim());
+        }
+        if (StringUtils.hasText(keyword)) {
+            String value = keyword.trim();
+            query.and(w -> w.like(CheckDiff::getLocation, value)
+                    .or().like(CheckDiff::getContentSnippet, value)
+                    .or().like(CheckDiff::getTemplateFormat, value)
+                    .or().like(CheckDiff::getActualFormat, value)
+                    .or().like(CheckDiff::getSuggestion, value));
+        }
+        query.orderByAsc(CheckDiff::getSeq);
+        return diffMapper.selectList(query);
     }
 
     /** 兼容图片功能上线前生成的元数据：重新解析一次并持久化。失败则保留旧数据。 */
@@ -304,10 +387,12 @@ public class TaskService {
         if (!Files.exists(targetPath)) {
             throw new BizException(404, "待校验文件已丢失");
         }
+        DocumentMeta cachedTargetMeta = loadCachedTargetMeta(task.getDocHash());
         CheckContext context = CheckContext.builder()
                 .taskId(taskId)
                 .template(template)
                 .templateMeta(templateMeta)
+                .targetMeta(cachedTargetMeta)
                 .targetFilePath(targetPath.toString())
                 .targetFileName(task.getDocName())
                 .customRules(task.getCustomRules())
@@ -346,6 +431,28 @@ public class TaskService {
         patch.setUpdatedAt(LocalDateTime.now());
         templateService.saveParseCache(patch);
         return meta;
+    }
+
+    /** 同指纹的成功任务已有版本 6 元数据时，直接复用，跳过 POI 解析。 */
+    private DocumentMeta loadCachedTargetMeta(String docHash) {
+        if (!StringUtils.hasText(docHash)) {
+            return null;
+        }
+        for (CheckTask candidate : taskMapper.selectMetadataCandidates(docHash)) {
+            if (!StringUtils.hasText(candidate.getDocumentMetadata())) {
+                continue;
+            }
+            try {
+                DocumentMeta meta = objectMapper.readValue(candidate.getDocumentMetadata(), DocumentMeta.class);
+                if (meta.getMetadataVersion() != null && meta.getMetadataVersion() >= 6) {
+                    log.info("复用任务 {} 的解析缓存", candidate.getId());
+                    return meta;
+                }
+            } catch (Exception e) {
+                log.warn("任务 {} 解析缓存损坏，忽略", candidate.getId());
+            }
+        }
+        return null;
     }
 
     private void persistSuccess(CheckTask task, CheckOutcome outcome, long begin) throws Exception {

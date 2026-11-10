@@ -11,8 +11,22 @@ export function listTasks(params) {
   return request.get('/tasks', { params })
 }
 
-export function getTaskDetail(id) {
-  return request.get(`/tasks/${id}`)
+export function getTaskDetail(id, light = true) {
+  return request.get(`/tasks/${id}`, { params: { light } })
+}
+
+/** 任务文档元数据懒加载，避免详情首屏携带完整段落/表格 JSON。 */
+export function getTaskMetadata(id) {
+  return request.get(`/tasks/${id}/metadata`)
+}
+
+/** 差异分页接口。 */
+export function getTaskDiffs(id, params = {}) {
+  return request.get(`/tasks/${id}/diffs`, { params: { page: 1, size: 200, ...params } })
+}
+
+export function getTaskDiffTypes(id) {
+  return request.get(`/tasks/${id}/diff-types`)
 }
 
 export function getTaskProgress(id) {

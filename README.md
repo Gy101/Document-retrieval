@@ -469,6 +469,10 @@ java -jar target/doc-check-server-1.0.0.jar
 | POST | `/api/tasks` | multipart：`file`、`templateId`、`customRules`（可选） |
 | GET | `/api/tasks?page=1&size=10&status=` | 任务历史 |
 | GET | `/api/tasks/{id}` | 任务详情，含 `document`（其中 `comments` 为 Word 批注）、`diffs` |
+| GET | `/api/tasks/{id}?light=true` | 轻量任务详情，不返回 `document` 和 `diffs` |
+| GET | `/api/tasks/{id}/metadata` | 懒加载任务文档元数据（自动升级到 v6） |
+| GET | `/api/tasks/{id}/diffs?page=1&size=200&severity=&type=&keyword=` | 差异服务端分页/筛选，`size` 上限 200 |
+| GET | `/api/tasks/{id}/diff-types` | 当前任务的差异类型列表 |
 | GET | `/api/tasks/{id}/progress` | 轻量进度查询 |
 | GET | `/api/tasks/{id}/document` | 读取任务原始 DOCX，用于 WPS 风格预览（本人或管理员） |
 | GET | `/api/tasks/{id}/images/{index}` | 读取任务 DOCX 内第 `index` 张图片（受权限保护） |
@@ -850,13 +854,25 @@ Word 中大量段落只设置 `pStyle`，缩进、行距、对齐写在样式定
 - **失败重试**：网络超时、429/5xx、临时 IO 异常最多重试 2 次；重试耗尽进入 `DEAD`，同时写入 `doccheck:queue:dead` 死信队列。
 - **上传防护**：校验扩展名与 `PK` 文件头；限制 ZIP entry 数、单 entry 大小、总解压大小与压缩比；同时设置 POI `ZipSecureFile` 阈值。
 - **登录限流与审计**：登录 IP 10 次/分钟、账号 5 次/分钟，注册 IP 5 次/小时；登录、注册、修改密码写入 `auth_audit`，不记录密码与 Token。
-- **自动化测试**：`mvn test` 覆盖 DOCX 安全校验、登录限流、任务终态；CI 同时执行后端测试/打包与前端构建。
+- **自动化测试**：`mvn test` 当前 11 个用例，覆盖 DOCX 安全校验、登录限流、任务终态、文件哈希和实例队列；CI 同时执行后端测试/打包与前端构建。
 
 已有数据库升级：
 
 ```bash
 mysql -u doccheck -p doc_format_check < backend/src/main/resources/db/upgrade-20261111.sql
 ```
+
+---
+
+
+### 10.13 多实例、线程池与载荷优化
+
+- **多实例队列**：每个实例使用独立的 `doccheck:queue:processing:{instanceId}`，实例心跳写入 `doccheck:instances`（TTL 90 秒）。实例异常退出后，其他实例通过 `recoverOrphaned()` 回收其 processing 任务；可用 `INSTANCE_ID` 或 `check.instance-id` 指定实例名。
+- **线程池隔离**：`parseExecutor` 负责 DOCX 解析，`dshExecutor` 负责模型调用，避免慢模型请求占满解析线程；解析超时 120 秒、模型超时 180 秒。
+- **文件与解析复用**：任务落盘前计算 SHA-256；同指纹文档复用已存文件和 v6 解析元数据，减少重复上传与解析。
+- **详情载荷优化**：默认 `GET /api/tasks/{id}` 使用 light 模式，只返回任务统计；文档元数据和差异通过独立接口懒加载，差异首批 200 条、后台续拉，服务端支持严重等级/类型/关键词过滤。
+- **组件拆分**：批注面板、差异面板、解析格式工具、预览样式已分别抽为 `DocumentCommentPanel.vue`、`TaskDiffPanel.vue`、`DocxFormatSupport.java`、`DocumentPreview.css`；`TaskDetailView.vue` 约 700 行、`DocumentPreview.vue` 约 950 行。
+- **测试**：`mvn test` 当前 11 个用例，覆盖 DOCX 安全、登录限流、任务终态、文件哈希、实例队列。
 
 ---
 
@@ -872,6 +888,12 @@ mysql -u doccheck -p doc_format_check < backend/src/main/resources/db/upgrade-20
 | `backend/src/main/resources/db/schema.sql` | 完整建表 SQL |
 | `backend/src/main/resources/db/upgrade-20261111.sql` | 已有数据库升级脚本 |
 | `backend/src/main/resources/prompts/format-check-system.txt` | 固定系统提示词 |
+| `backend/src/main/java/com/doccheck/parser/DocxFormatSupport.java` | 解析格式换算工具 |
+| `backend/src/main/java/com/doccheck/service/CheckTaskWatchdog.java` | RUNNING 任务超时看门狗 |
+| `backend/src/main/java/com/doccheck/service/DocxSecurityValidator.java` | DOCX 魔数与 Zip 炸弹防护 |
+| `backend/src/main/java/com/doccheck/service/storage/FileHashes.java` | 文件 SHA-256 指纹 |
+| `frontend/src/components/TaskDiffPanel.vue` | 差异筛选与列表组件 |
+| `frontend/src/components/DocumentCommentPanel.vue` | 模板/文档批注面板 |
 | `backend/src/main/java/com/doccheck/parser/DocxParser.java` | POI 全量格式解析（含批注锚点） |
 | `backend/src/main/java/com/doccheck/parser/model/CommentMeta.java` | Word 批注元数据 |
 | `backend/src/main/java/com/doccheck/check/DocumentSections.java` | 按标题切分章节并匹配同名章节 |

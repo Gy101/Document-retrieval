@@ -7,6 +7,8 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.util.List;
+
 @Mapper
 public interface CheckTaskMapper extends BaseMapper<CheckTask> {
 
@@ -22,4 +24,21 @@ public interface CheckTaskMapper extends BaseMapper<CheckTask> {
             WHERE user_id = #{userId} AND deleted = 0
             """)
     ProfileStatsVO selectProfileStats(@Param("userId") Long userId);
+
+    /** 同一 SHA-256 的历史任务文件可直接复用，避免重复落盘。 */
+    @Select("""
+            SELECT * FROM check_task
+            WHERE doc_hash = #{hash} AND doc_path IS NOT NULL AND deleted = 0
+            ORDER BY id DESC LIMIT 1
+            """)
+    CheckTask selectReusableFile(@Param("hash") String hash);
+
+    /** 同一文件的历史解析结果可用于跳过再次解析；只取少量最新成功任务。 */
+    @Select("""
+            SELECT * FROM check_task
+            WHERE doc_hash = #{hash} AND status = 'SUCCESS'
+              AND document_metadata IS NOT NULL AND deleted = 0
+            ORDER BY id DESC LIMIT 3
+            """)
+    List<CheckTask> selectMetadataCandidates(@Param("hash") String hash);
 }

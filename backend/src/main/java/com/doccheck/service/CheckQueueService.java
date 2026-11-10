@@ -1,20 +1,24 @@
 package com.doccheck.service;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.doccheck.domain.entity.CheckTask;
 import com.doccheck.domain.enums.TaskStatus;
 import com.doccheck.mapper.CheckTaskMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.lang.management.ManagementFactory;
+import java.net.InetAddress;
 import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * 基于 Redis List 的可靠队列。
@@ -30,12 +34,76 @@ import java.util.Set;
 public class CheckQueueService {
 
     public static final String QUEUE_KEY = "doccheck:queue";
-    public static final String PROCESSING_KEY = "doccheck:queue:processing";
     public static final String DEAD_KEY = "doccheck:queue:dead";
     public static final String PROGRESS_KEY_PREFIX = "doccheck:task:progress:";
+    public static final String INSTANCE_ZSET = "doccheck:instances";
+    public static final String INSTANCE_KEY_PREFIX = "doccheck:instance:";
+    public static final String PROCESSING_KEY_PREFIX = "doccheck:queue:processing:";
+    private static final Duration INSTANCE_TTL = Duration.ofSeconds(90);
+    private static final long ORPHAN_AFTER_MS = 90_000L;
 
     private final StringRedisTemplate redisTemplate;
     private final CheckTaskMapper taskMapper;
+
+    @Value("${check.instance-id:${INSTANCE_ID:}}")
+    private String configuredInstanceId;
+
+    private volatile String instanceId;
+
+    @PostConstruct
+    public void initInstance() {
+        String id = configuredInstanceId;
+        if (id == null || id.isBlank()) {
+            String host;
+            try {
+                host = InetAddress.getLocalHost().getHostName();
+            } catch (Exception e) {
+                host = "local";
+            }
+            id = host + "-" + ManagementFactory.getRuntimeMXBean().getName() + "-"
+                    + UUID.randomUUID().toString().substring(0, 8);
+        }
+        this.instanceId = id.replaceAll("[^a-zA-Z0-9._-]", "_");
+        registerInstance();
+        log.info("队列实例标识: {}", this.instanceId);
+    }
+
+    public String instanceId() {
+        if (instanceId == null) {
+            initInstance();
+        }
+        return instanceId;
+    }
+
+    private String instanceKey(String id) {
+        return INSTANCE_KEY_PREFIX + id;
+    }
+
+    private String processingKey() {
+        return PROCESSING_KEY_PREFIX + instanceId();
+    }
+
+    private String processingKey(String id) {
+        return PROCESSING_KEY_PREFIX + id;
+    }
+
+    /** 注册当前实例并续租；实例列表用于发现已崩溃实例遗留的 processing 队列。 */
+    public void registerInstance() {
+        try {
+            String id = instanceId();
+            redisTemplate.opsForValue().set(instanceKey(id), String.valueOf(System.currentTimeMillis()),
+                    INSTANCE_TTL);
+            redisTemplate.opsForZSet().add(INSTANCE_ZSET, id, System.currentTimeMillis());
+        } catch (RuntimeException e) {
+            log.warn("队列实例注册失败: {}", e.getMessage());
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${check.queue.heartbeat-ms:30000}", initialDelayString = "5000")
+    public void heartbeat() {
+        registerInstance();
+        recoverOrphaned();
+    }
 
     public void enqueue(Long taskId) {
         redisTemplate.opsForList().leftPush(QUEUE_KEY, String.valueOf(taskId));
@@ -44,7 +112,7 @@ public class CheckQueueService {
 
     /** 原子取出一个任务；没有任务时返回 null。 */
     public Long dequeue() {
-        String value = redisTemplate.opsForList().rightPopAndLeftPush(QUEUE_KEY, PROCESSING_KEY);
+        String value = redisTemplate.opsForList().rightPopAndLeftPush(QUEUE_KEY, processingKey());
         if (value == null) {
             return null;
         }
@@ -52,13 +120,13 @@ public class CheckQueueService {
             return Long.parseLong(value);
         } catch (NumberFormatException e) {
             log.warn("队列中存在非法任务 ID: {}", value);
-            redisTemplate.opsForList().remove(PROCESSING_KEY, 1, value);
+            redisTemplate.opsForList().remove(processingKey(), 1, value);
             return null;
         }
     }
 
     public void ack(Long taskId) {
-        redisTemplate.opsForList().remove(PROCESSING_KEY, 1, String.valueOf(taskId));
+        redisTemplate.opsForList().remove(processingKey(), 1, String.valueOf(taskId));
     }
 
     /** 无法重试的任务写入死信列表，保留现场供人工排查；最多保留 1000 条。 */
@@ -73,9 +141,58 @@ public class CheckQueueService {
         return redisTemplate.opsForList().size(DEAD_KEY);
     }
 
-    /** 启动时恢复 processing 列表，避免进程崩溃后任务永久停留在「处理中」。 */
+    /** 启动时恢复当前实例的 processing 列表；其他实例的遗留队列由 recoverOrphaned 处理。 */
     public void recoverProcessing() {
-        List<String> values = redisTemplate.opsForList().range(PROCESSING_KEY, 0, -1);
+        recoverList(processingKey());
+    }
+
+    /**
+     * 发现心跳已过期的其它实例，回收其 processing 列表。
+     *
+     * <p>用每实例独立的 processing key 替代单一全局列表：正常实例只 ack 自己的任务，
+     * 不会把其他实例正在执行的任务 LREM 掉；实例崩溃后由租约过期触发回收。
+     */
+    public void recoverOrphaned() {
+        long cutoff = System.currentTimeMillis() - ORPHAN_AFTER_MS;
+        Set<String> ids;
+        try {
+            ids = redisTemplate.opsForZSet().rangeByScore(INSTANCE_ZSET, 0, cutoff);
+        } catch (RuntimeException e) {
+            log.warn("扫描遗留实例失败: {}", e.getMessage());
+            return;
+        }
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+        for (String id : ids) {
+            if (id == null || id.equals(instanceId())) {
+                continue;
+            }
+            try {
+                if (Boolean.TRUE.equals(redisTemplate.hasKey(instanceKey(id)))) {
+                    redisTemplate.opsForZSet().add(INSTANCE_ZSET, id, System.currentTimeMillis());
+                    continue;
+                }
+                String lockKey = "doccheck:lock:recover:" + id;
+                Boolean locked = redisTemplate.opsForValue().setIfAbsent(lockKey, "1", Duration.ofSeconds(60));
+                if (!Boolean.TRUE.equals(locked)) {
+                    continue;
+                }
+                try {
+                    recoverList(processingKey(id));
+                    redisTemplate.delete(instanceKey(id));
+                    redisTemplate.opsForZSet().remove(INSTANCE_ZSET, id);
+                } finally {
+                    redisTemplate.delete(lockKey);
+                }
+            } catch (RuntimeException e) {
+                log.warn("回收实例 {} 的遗留任务失败: {}", id, e.getMessage());
+            }
+        }
+    }
+
+    private void recoverList(String processingKey) {
+        List<String> values = redisTemplate.opsForList().range(processingKey, 0, -1);
         if (values == null || values.isEmpty()) {
             return;
         }
@@ -85,23 +202,23 @@ public class CheckQueueService {
             try {
                 taskId = Long.parseLong(value);
             } catch (NumberFormatException e) {
-                redisTemplate.opsForList().remove(PROCESSING_KEY, 1, value);
+                redisTemplate.opsForList().remove(processingKey, 1, value);
                 continue;
             }
             CheckTask task = taskMapper.selectById(taskId);
             if (task == null || TaskStatus.isTerminal(task.getStatus())) {
-                redisTemplate.opsForList().remove(PROCESSING_KEY, 1, value);
+                redisTemplate.opsForList().remove(processingKey, 1, value);
                 continue;
             }
             CheckTask patch = new CheckTask();
             patch.setId(taskId);
             patch.setStatus(TaskStatus.QUEUED.name());
-            patch.setStage("排队中（服务重启恢复）");
+            patch.setStage("排队中（实例恢复）");
             patch.setUpdatedAt(java.time.LocalDateTime.now());
             taskMapper.updateById(patch);
             redisTemplate.opsForList().leftPush(QUEUE_KEY, value);
-            redisTemplate.opsForList().remove(PROCESSING_KEY, 1, value);
-            log.info("恢复排队任务 {}", taskId);
+            redisTemplate.opsForList().remove(processingKey, 1, value);
+            log.info("恢复排队任务 {}（processing={}）", taskId, processingKey);
         }
     }
 
@@ -132,5 +249,10 @@ public class CheckQueueService {
     /** 仅供运维/测试：查询当前排队长度。 */
     public Long queueSize() {
         return redisTemplate.opsForList().size(QUEUE_KEY);
+    }
+
+    /** 仅供运维/测试：当前实例 processing 长度。 */
+    public Long processingSize() {
+        return redisTemplate.opsForList().size(processingKey());
     }
 }

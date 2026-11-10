@@ -114,8 +114,22 @@ validation:
     max-compression-ratio: ${UPLOAD_MAX_COMPRESSION_RATIO:120}
 
 check:
+  # 多实例部署时建议显式设置唯一实例 ID（如 Pod 名）；留空则使用主机名+PID+随机串
+  instance-id: ${CHECK_INSTANCE_ID:${INSTANCE_ID:}}
+  # 解析/模型/编排三类线程池隔离；参数同时控制并发与背压
+  parse:
+    core: ${CHECK_PARSE_CORE:2}
+    max: ${CHECK_PARSE_MAX:4}
+    queue: ${CHECK_PARSE_QUEUE:100}
+  dsh:
+    core: ${CHECK_DSH_CORE:2}
+    max: ${CHECK_DSH_MAX:8}
+    queue: ${CHECK_DSH_QUEUE:50}
+  parse-timeout-seconds: ${CHECK_PARSE_TIMEOUT_SECONDS:120}
+  model-timeout-seconds: ${CHECK_MODEL_TIMEOUT_SECONDS:180}
   queue:
     poll-interval-ms: ${CHECK_QUEUE_POLL_MS:1000}
+    heartbeat-ms: ${CHECK_QUEUE_HEARTBEAT_MS:30000}
     max-retries: ${CHECK_QUEUE_MAX_RETRIES:2}
   watchdog:
     interval-ms: ${CHECK_WATCHDOG_INTERVAL_MS:30000}

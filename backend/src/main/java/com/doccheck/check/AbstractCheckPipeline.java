@@ -9,9 +9,16 @@ import com.doccheck.domain.model.FormatDiff;
 import com.doccheck.parser.DocxParser;
 import com.doccheck.parser.model.DocumentMeta;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
@@ -26,10 +33,25 @@ public abstract class AbstractCheckPipeline {
     protected final DocxParser docxParser;
     protected final ValidationProperties validationProperties;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    @Qualifier("parseExecutor")
+    private ThreadPoolTaskExecutor parseExecutor;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    @Qualifier("dshExecutor")
+    private ThreadPoolTaskExecutor dshExecutor;
+
+    @Value("${check.parse-timeout-seconds:120}")
+    private int parseTimeoutSeconds;
+
+    @Value("${check.model-timeout-seconds:180}")
+    private int modelTimeoutSeconds;
+
     public final CheckOutcome execute(CheckContext context, ProgressCallback progress) {
         progress.update(3, "准备校验");
-        DocumentMeta targetMeta = parseTarget(context);
-        progress.update(35, "待校验文档解析完成");
+        boolean cached = context.getTargetMeta() != null;
+        DocumentMeta targetMeta = cached ? context.getTargetMeta() : parseTarget(context);
+        progress.update(35, cached ? "复用历史解析结果" : "待校验文档解析完成");
 
         List<FormatDiff> localDiffs = new ArrayList<>();
         if (validationProperties.isLocalRulesEnabled()) {
@@ -47,7 +69,7 @@ public abstract class AbstractCheckPipeline {
         }
         progress.update(50, "本地规则校验完成");
 
-        DshCompareResult dsh = compareWithModel(context, targetMeta);
+        DshCompareResult dsh = compareWithModelAsync(context, targetMeta);
         progress.update(82, "大模型比对完成");
 
         List<FormatDiff> merged = normalizeAndMerge(localDiffs, dsh.getDiffs());
@@ -76,12 +98,64 @@ public abstract class AbstractCheckPipeline {
     /** 由子类注入全部策略 Bean。 */
     protected abstract List<FormatCheckStrategy> strategies();
 
+    /**
+     * 解析放入独立线程池执行。任务编排线程只等待结果，不直接做 CPU/IO 密集解析。
+     */
     private DocumentMeta parseTarget(CheckContext context) {
         try {
-            return docxParser.parse(Path.of(context.getTargetFilePath()), context.getTargetFileName());
-        } catch (Exception e) {
-            throw new BizException(422, "待校验文档解析失败，请确认是有效的 .docx 文件: " + e.getMessage(), e);
+            return await(CompletableFuture.supplyAsync(
+                    () -> {
+                        try {
+                            return docxParser.parse(Path.of(context.getTargetFilePath()), context.getTargetFileName());
+                        } catch (Exception e) {
+                            throw new BizException(422, "待校验文档解析失败，请确认是有效的 .docx 文件: "
+                                    + e.getMessage(), e);
+                        }
+                    }, parseExecutor), parseTimeoutSeconds, "文档解析超时");
+        } catch (BizException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new BizException(422, "待校验文档解析失败: " + rootMessage(e), e);
         }
+    }
+
+    /** DSH 调用放入独立线程池，避免模型网络抖动占满解析线程。 */
+    private DshCompareResult compareWithModelAsync(CheckContext context, DocumentMeta targetMeta) {
+        try {
+            return await(CompletableFuture.supplyAsync(
+                    () -> compareWithModel(context, targetMeta), dshExecutor),
+                    modelTimeoutSeconds, "DSH 模型调用超时");
+        } catch (BizException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new BizException(502, "DSH 模型调用失败: " + rootMessage(e), e);
+        }
+    }
+
+    private <T> T await(CompletableFuture<T> future, int timeoutSeconds, String timeoutMessage) {
+        try {
+            return future.get(Math.max(1, timeoutSeconds), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new BizException(504, timeoutMessage + "（" + timeoutSeconds + "s）", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BizException(503, "校验线程被中断", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new BizException(500, "校验执行失败: " + (cause == null ? e.getMessage() : cause.getMessage()), cause);
+        }
+    }
+
+    private String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 
     private CheckContext contextWithTarget(CheckContext context, DocumentMeta targetMeta) {
