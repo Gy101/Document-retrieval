@@ -1,0 +1,57 @@
+# 通用文档格式智能校验系统 - 自定义文本检索规则
+#
+# 使用方式：
+#   1. 复制本文件到后端启动目录的 config/search-rules.yml；
+#   2. 按需启用规则并修改 pattern；
+#   3. 保存后约 15 秒自动热加载，或调用 POST /api/rules/search/reload。
+#
+# 字段说明：
+#   mode: required（必须出现）| forbidden（禁止出现）
+#   match: contains（关键词）| regex（正则）
+#   scope: body（正文段落）| table（表格单元格）| header（页眉）| footer（页脚）| all
+#   severity: high | middle | low
+#   enabled: 是否启用该条规则
+version: 1
+enabled: true
+rules:
+  # 示例一：禁止出现未替换的占位符
+  - id: no-placeholder
+    name: 未替换占位符
+    pattern: '(X{3,}|TODO|待补充|请填写)'
+    match: regex
+    mode: forbidden
+    scope: all
+    severity: middle
+    message: 文档中仍存在未替换的占位符
+    suggestion: 将占位符替换为实际内容后再提交
+    caseSensitive: false
+    maxHits: 10
+    enabled: false
+
+  # 示例二：正文必须出现“摘要”
+  - id: required-abstract
+    name: 摘要缺失
+    pattern: 摘要
+    match: contains
+    mode: required
+    scope: body
+    severity: high
+    message: 文档正文未检索到“摘要”
+    suggestion: 按模板要求补充摘要章节
+    caseSensitive: false
+    maxHits: 1
+    enabled: false
+
+  # 示例三：页眉禁止出现内部编号
+  - id: header-no-internal-no
+    name: 页眉内部编号
+    pattern: '内部编号[:：]\s*\S+'
+    match: regex
+    mode: forbidden
+    scope: header
+    severity: low
+    message: 页眉中包含内部编号
+    suggestion: 删除页眉中的内部编号后再提交
+    caseSensitive: false
+    maxHits: 5
+    enabled: false

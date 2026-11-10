@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:doc_format_check}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    # 本机 phpStudy 已验证账号；生产环境请用 MYSQL_USER/MYSQL_PASSWORD 覆盖
+    username: ${MYSQL_USER:doccheck}
+    password: ${MYSQL_PASSWORD:doccheck123}
+
+storage:
+  type: local
+  local:
+    root: ./data/uploads
+
+dsh:
+  mock: true
+
+logging:
+  level:
+    com.doccheck: DEBUG
