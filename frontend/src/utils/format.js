@@ -21,7 +21,8 @@ export const STATUS_META = {
   QUEUED: { label: '排队中', type: 'info' },
   RUNNING: { label: '处理中', type: 'warning' },
   SUCCESS: { label: '校验成功', type: 'success' },
-  FAILED: { label: '校验失败', type: 'danger' }
+  FAILED: { label: '校验失败', type: 'danger' },
+  DEAD: { label: '已终止', type: 'danger' }
 }
 
 export const SEVERITY_META = {

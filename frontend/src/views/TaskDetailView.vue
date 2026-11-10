@@ -102,10 +102,10 @@
         </div>
       </div>
 
-      <div v-else-if="task.status === 'FAILED'" class="failed-wrap">
+      <div v-else-if="task.status === 'FAILED' || task.status === 'DEAD'" class="failed-wrap">
         <div class="dc-card failed-card">
           <div class="failed-icon"><el-icon><CircleCloseFilled /></el-icon></div>
-          <h3>校验任务执行失败</h3>
+          <h3>{{ task.status === 'DEAD' ? '任务已终止' : '校验任务执行失败' }}</h3>
           <p class="failed-msg">{{ task.errorMessage || '任务执行过程中发生未知错误，请重新提交校验。' }}</p>
           <div class="failed-actions">
             <el-button type="primary" @click="recheck">使用相同模板重新校验</el-button>
@@ -295,7 +295,7 @@ let polling = false
 let loadedTemplateCommentKey = ''
 
 const diffs = computed(() => task.value?.diffs || [])
-const isTerminal = computed(() => ['SUCCESS', 'FAILED'].includes(task.value?.status))
+const isTerminal = computed(() => ['SUCCESS', 'FAILED', 'DEAD'].includes(task.value?.status))
 
 const severityFilters = computed(() => [
   { value: 'ALL', label: '全部', count: diffs.value.length },
@@ -403,7 +403,7 @@ async function poll() {
         finishedAt: p.finishedAt || task.value.finishedAt
       }
     }
-    if (['SUCCESS', 'FAILED'].includes(p.status)) {
+    if (['SUCCESS', 'FAILED', 'DEAD'].includes(p.status)) {
       stopPolling()
       await loadDetail(false)
     } else {
@@ -535,7 +535,7 @@ onUnmounted(() => {
 .status-pill.queued { background: #f1f5f9; color: #64748b; }
 .status-pill.running { background: #fffbeb; color: #b45309; }
 .status-pill.success { background: #ecfdf5; color: #0f766e; }
-.status-pill.failed { background: #fef2f2; color: #b91c1c; }
+.status-pill.failed, .status-pill.dead { background: #fef2f2; color: #991b1b; }
 
 .sub-line {
   display: flex;

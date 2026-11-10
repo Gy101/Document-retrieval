@@ -106,14 +106,30 @@ validation:
   search-rules-file: ${SEARCH_RULES_FILE:./config/search-rules.yml}
   # 外部规则文件修改后的热加载轮询间隔（毫秒）
   search-rules-watch-ms: ${SEARCH_RULES_WATCH_MS:15000}
+  upload:
+    max-uncompressed-mb: ${UPLOAD_MAX_UNCOMPRESSED_MB:200}
+    max-entry-mb: ${UPLOAD_MAX_ENTRY_MB:80}
+    max-entries: ${UPLOAD_MAX_ENTRIES:5000}
+    max-compression-ratio: ${UPLOAD_MAX_COMPRESSION_RATIO:120}
+
+check:
+  queue:
+    poll-interval-ms: ${CHECK_QUEUE_POLL_MS:1000}
+    max-retries: ${CHECK_QUEUE_MAX_RETRIES:2}
+  watchdog:
+    interval-ms: ${CHECK_WATCHDOG_INTERVAL_MS:30000}
+    timeout-minutes: ${CHECK_WATCHDOG_TIMEOUT_MINUTES:15}
+    batch-size: ${CHECK_WATCHDOG_BATCH_SIZE:20}
 
 auth:
   token-ttl-hours: 8
+  # 仅当 Nginx 等可信反向代理会覆盖转发头时才开启，否则客户端可伪造 IP 绕过限流。
+  trust-proxy: ${AUTH_TRUST_PROXY:false}
   demo-username: ${DEMO_USERNAME:admin}
   demo-password: ${DEMO_PASSWORD:admin123}
 
 logging:
   level:
     root: INFO
-    com.doccheck: DEBUG
+    com.doccheck: INFO
     org.apache.poi: WARN

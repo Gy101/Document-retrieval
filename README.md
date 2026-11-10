@@ -374,11 +374,14 @@ java -jar target/doc-check-server-1.0.0.jar
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
+| `AUTH_TRUST_PROXY` | `false` | 是否信任 X-Forwarded-For / X-Real-IP；仅在可信反向代理后开启 |
 | `DEMO_USERNAME` | `admin` | 首次启动创建的管理员账号 |
 | `DEMO_PASSWORD` | `admin123` | 首次启动创建的管理员密码 |
 
 - 密码使用 BCrypt 存储。
 - 登录成功后生成随机 Token，写入 Redis `auth:token:{token}`，默认 8 小时过期。
+- 登录限流：同一 IP 10 次/分钟、同一账号 5 次/分钟；注册 IP 5 次/小时；超限返回 HTTP 429。
+- 登录、注册、修改密码写入 `auth_audit` 审计表，不记录密码和 Token。
 - 前端通过 `Authorization: Bearer {token}` 访问受保护接口。
 - 生产环境务必修改默认密码，并通过 HTTPS 部署。
 
@@ -394,6 +397,13 @@ java -jar target/doc-check-server-1.0.0.jar
 | `validation.search-rules-file` | `./config/search-rules.yml` | 外部 YAML 检索规则文件；不存在时回退 classpath 示例 |
 | `validation.search-rules-watch-ms` | `15000` | 外部规则文件热加载轮询间隔 |
 | `spring.servlet.multipart.max-file-size` | `50MB` | 单文件上限 |
+| `validation.upload.max-uncompressed-mb` | `200` | DOCX 解压后总大小上限 |
+| `validation.upload.max-entry-mb` | `80` | 单个 ZIP entry 解压上限 |
+| `validation.upload.max-entries` | `5000` | ZIP entry 数量上限 |
+| `validation.upload.max-compression-ratio` | `120` | 总解压大小 / 压缩包大小上限 |
+| `check.queue.max-retries` | `2` | 可重试任务的最大重试次数 |
+| `check.watchdog.timeout-minutes` | `15` | RUNNING 任务超时阈值 |
+| `check.watchdog.interval-ms` | `30000` | 超时扫描间隔 |
 
 ---
 
@@ -476,7 +486,7 @@ java -jar target/doc-check-server-1.0.0.jar
 { "taskId": 3, "taskNo": "DC202611071922470487", "status": "QUEUED", "progress": 0 }
 ```
 
-任务状态：`QUEUED` → `RUNNING` → `SUCCESS` / `FAILED`。
+任务状态：`QUEUED` → `RUNNING` → `SUCCESS` / `FAILED` / `DEAD`。可重试异常会回到 `QUEUED` 并增加 `retry_count`；重试耗尽进入 `DEAD` 并写入死信队列。
 
 差异字段：
 
@@ -547,13 +557,15 @@ java -jar target/doc-check-server-1.0.0.jar
 ## 9. 数据库设计
 
 建表脚本：`backend/src/main/resources/db/schema.sql`。
+已有数据库升级：`backend/src/main/resources/db/upgrade-20261111.sql`（新增 `check_task.retry_count` 与 `auth_audit`）。应用启动时 `DatabaseCompatibilityInitializer` 也会幂等检查并补充 `retry_count`；生产环境仍建议显式执行升级脚本。
 
 | 表 | 作用 | 关键字段 |
 |---|---|---|
 | `sys_user` | 用户 | `username` 唯一、`password_hash`、`display_name`、`email`、`role`、`status` |
 | `doc_template` | 模板库 | `scope`、`owner_id`、`parse_status`、`metadata_json`、`file_hash`、`download_count` |
-| `check_task` | 校验任务 | `task_no`、`status`、`progress`、`stage`、四类差异计数、`document_metadata`、`result_json` |
+| `check_task` | 校验任务 | `task_no`、`status`、`retry_count`、`progress`、`stage`、四类差异计数、`document_metadata`、`result_json` |
 | `check_diff` | 差异明细 | `task_id`、`diff_no`、`seq`、`anchor_path`、`severity`、`diff_type`、`template_format`、`actual_format`、`suggestion` |
+| `auth_audit` | 认证审计 | `username`、`ip`、`user_agent`、`action_type`、`success`、`created_at` |
 
 主要索引：
 
@@ -564,6 +576,9 @@ java -jar target/doc-check-server-1.0.0.jar
 - `idx_diff_task_seq(task_id, seq)`
 - `idx_diff_task_severity(task_id, severity)`
 - `idx_diff_task_anchor(task_id, anchor_path)`
+- `idx_auth_audit_user_time(username, created_at)`
+- `idx_auth_audit_action_time(action_type, created_at)`
+- `idx_auth_audit_ip_time(ip, created_at)`
 
 所有业务表使用 `utf8mb4` / `utf8mb4_0900_ai_ci`，并带字段注释；模板与任务使用 `deleted` 逻辑删除。
 
@@ -768,7 +783,7 @@ rules:
 
 模板中的 Word 批注会随解析进入 `document.comments`，不再只是“看不见的说明”：
 
-- `DocxParser` 读取 `w:commentRangeStart`，将批注关联到 `body.p[n]`，记录作者、时间、正文和锚点；元数据版本升为 `4`，旧模板/旧任务在读取时自动重解析升级。
+- `DocxParser` 读取 `w:commentRangeStart`，将批注关联到 `body.p[n]`，记录作者、时间、正文和锚点；元数据版本升为 `6`，旧模板/旧任务在读取时自动重解析升级。
 - 模板库预览和任务详情页工具栏显示「批注 N」。点击批注会切换到结构标注并定位到对应段落，方便对照模板要求。
 - `TemplateCommentStrategy` 解析批注中的可量化约束，目前支持：
   - 字数范围：`300-600 字`、`300～600字` 等；
@@ -827,6 +842,23 @@ Word 中大量段落只设置 `pStyle`，缩进、行距、对齐写在样式定
 
 ---
 
+### 10.12 可靠性与安全加固
+
+- **队列容量感知**：`TaskDispatcher` 只在 `checkExecutor` 有空闲线程、队列有空位时领取任务，避免 Redis 队列无限堆积。
+- **超时看门狗**：`CheckTaskWatchdog` 每 30 秒扫描 RUNNING 超过 15 分钟的任务，条件更新为 FAILED，并清理 processing 队列。
+- **失败重试**：网络超时、429/5xx、临时 IO 异常最多重试 2 次；重试耗尽进入 `DEAD`，同时写入 `doccheck:queue:dead` 死信队列。
+- **上传防护**：校验扩展名与 `PK` 文件头；限制 ZIP entry 数、单 entry 大小、总解压大小与压缩比；同时设置 POI `ZipSecureFile` 阈值。
+- **登录限流与审计**：登录 IP 10 次/分钟、账号 5 次/分钟，注册 IP 5 次/小时；登录、注册、修改密码写入 `auth_audit`，不记录密码与 Token。
+- **自动化测试**：`mvn test` 覆盖 DOCX 安全校验、登录限流、任务终态；CI 同时执行后端测试/打包与前端构建。
+
+已有数据库升级：
+
+```bash
+mysql -u doccheck -p doc_format_check < backend/src/main/resources/db/upgrade-20261111.sql
+```
+
+---
+
 ## 11. 关键文件清单
 
 ### 后端
@@ -837,6 +869,7 @@ Word 中大量段落只设置 `pStyle`，缩进、行距、对齐写在样式定
 | `backend/src/main/resources/application.yml` | 主配置 |
 | `backend/src/main/resources/application-dev.yml` | 开发环境覆盖 |
 | `backend/src/main/resources/db/schema.sql` | 完整建表 SQL |
+| `backend/src/main/resources/db/upgrade-20261111.sql` | 已有数据库升级脚本 |
 | `backend/src/main/resources/prompts/format-check-system.txt` | 固定系统提示词 |
 | `backend/src/main/java/com/doccheck/parser/DocxParser.java` | POI 全量格式解析（含批注锚点） |
 | `backend/src/main/java/com/doccheck/parser/model/CommentMeta.java` | Word 批注元数据 |
@@ -852,7 +885,12 @@ Word 中大量段落只设置 `pStyle`，缩进、行距、对齐写在样式定
 | `backend/src/main/java/com/doccheck/service/GeneratedRuleYaml.java` | 生成结果（文件名 + YAML 内容） |
 | `backend/config/search-rules.yml` | 可直接编辑的外部检索规则示例 |
 | `backend/src/main/java/com/doccheck/service/TaskService.java` | 任务创建/执行/持久化 |
-| `backend/src/main/java/com/doccheck/service/CheckQueueService.java` | Redis 队列/进度 |
+| `backend/src/main/java/com/doccheck/service/CheckQueueService.java` | Redis 队列/进度/死信 |
+| `backend/src/main/java/com/doccheck/service/TaskDispatcher.java` | 按线程池容量领取任务 |
+| `backend/src/main/java/com/doccheck/service/CheckTaskWatchdog.java` | RUNNING 超时看门狗 |
+| `backend/src/main/java/com/doccheck/service/DocxSecurityValidator.java` | DOCX 魔数/ZIP 炸弹校验 |
+| `backend/src/main/java/com/doccheck/service/LoginRateLimiter.java` | 登录/注册限流 |
+| `backend/src/main/java/com/doccheck/service/AuthAuditService.java` | 认证审计 |
 | `backend/src/main/java/com/doccheck/service/storage/StorageService.java` | 存储抽象（MinIO 扩展点） |
 | `backend/src/main/java/com/doccheck/controller/*.java` | REST 接口 |
 

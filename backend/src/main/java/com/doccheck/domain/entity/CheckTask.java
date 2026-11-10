@@ -34,10 +34,13 @@ public class CheckTask {
 
     private String customRules;
 
-    /** QUEUED / RUNNING / SUCCESS / FAILED */
+    /** QUEUED / RUNNING / SUCCESS / FAILED / DEAD */
     private String status;
 
     private Integer progress;
+
+    /** 已重试次数；达到上限后进入 DEAD 死信状态 */
+    private Integer retryCount;
 
     private String stage;
 

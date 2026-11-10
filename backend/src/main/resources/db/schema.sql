@@ -60,8 +60,9 @@ CREATE TABLE IF NOT EXISTS `check_task` (
   `doc_size`        BIGINT       NOT NULL DEFAULT 0 COMMENT '文件字节数',
   `doc_hash`        CHAR(64)     NOT NULL DEFAULT '' COMMENT 'SHA-256',
   `custom_rules`    TEXT         NULL COMMENT '用户自定义校验规则（自然语言/JSON）',
-  `status`          VARCHAR(20)  NOT NULL DEFAULT 'QUEUED' COMMENT '状态：QUEUED/RUNNING/SUCCESS/FAILED',
+  `status`          VARCHAR(20)  NOT NULL DEFAULT 'QUEUED' COMMENT '状态：QUEUED/RUNNING/SUCCESS/FAILED/DEAD',
   `progress`        INT          NOT NULL DEFAULT 0 COMMENT '进度 0-100',
+  `retry_count`     INT          NOT NULL DEFAULT 0 COMMENT '已重试次数',
   `stage`           VARCHAR(100) NOT NULL DEFAULT '排队中' COMMENT '当前阶段描述',
   `error_message`   VARCHAR(1000) NOT NULL DEFAULT '' COMMENT '失败原因',
   `summary`         TEXT         NULL COMMENT '校验结论摘要',
@@ -113,3 +114,19 @@ CREATE TABLE IF NOT EXISTS `check_diff` (
   KEY `idx_diff_task_type` (`task_id`, `diff_type`),
   KEY `idx_diff_task_anchor` (`task_id`, `anchor_path`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='格式差异明细表';
+
+-- 认证审计：只记录认证动作，不记录密码/Token。
+CREATE TABLE IF NOT EXISTS `auth_audit` (
+  `id`          BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `username`    VARCHAR(64)  NULL COMMENT '登录名（失败时可能是输入值）',
+  `ip`          VARCHAR(64)  NULL COMMENT '客户端 IP',
+  `user_agent`  VARCHAR(512) NULL COMMENT 'User-Agent',
+  `action_type` VARCHAR(32)  NOT NULL COMMENT '动作：LOGIN/REGISTER/LOGOUT/CHANGE_PASSWORD',
+  `success`     TINYINT      NOT NULL DEFAULT 0 COMMENT '是否成功：1成功 0失败',
+  `message`     VARCHAR(500) NULL COMMENT '结果说明',
+  `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发生时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_auth_audit_user_time` (`username`, `created_at`),
+  KEY `idx_auth_audit_action_time` (`action_type`, `created_at`),
+  KEY `idx_auth_audit_ip_time` (`ip`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='认证审计流水';

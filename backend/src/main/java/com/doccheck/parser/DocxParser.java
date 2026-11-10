@@ -1,6 +1,7 @@
 package com.doccheck.parser;
 
 import com.doccheck.parser.model.*;
+import org.apache.poi.openxml4j.util.ZipSecureFile;
 import org.apache.poi.xwpf.usermodel.*;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.*;
 import org.openxmlformats.schemas.drawingml.x2006.picture.CTPicture;
@@ -33,6 +34,13 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class DocxParser {
+
+    static {
+        // 双保险：即使文件绕过上传校验（历史文件/内部调用），POI 仍限制解压膨胀。
+        ZipSecureFile.setMinInflateRatio(0.01);
+        ZipSecureFile.setMaxEntrySize(100L * 1024 * 1024);
+        ZipSecureFile.setMaxTextSize(100L * 1024 * 1024);
+    }
 
     /** 图片所在容器，用于生成 header[i].p[j] / footer[i].p[j] / 表格单元格定位。 */
     private record ImageContainer(String type, Integer headerIndex, Integer footerIndex,

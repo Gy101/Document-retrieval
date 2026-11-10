@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
@@ -61,6 +62,10 @@ public class TaskService {
     private final DocxParser docxParser;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
+    private final DocxSecurityValidator securityValidator;
+
+    @Value("${check.queue.max-retries:2}")
+    private int maxRetries;
 
     public CreateTaskResponse create(MultipartFile file, Long templateId, String customRules) {
         if (file == null || file.isEmpty()) {
@@ -71,6 +76,7 @@ public class TaskService {
             throw new BizException(415, "仅支持 .docx 格式（不支持旧版 .doc）");
         }
         DocTemplate template = templateService.requireVisible(templateId);
+        securityValidator.validate(file);
         Long userId = UserContext.userId();
 
         StoredFile stored = storageService.store(file, "document");
@@ -87,6 +93,7 @@ public class TaskService {
         task.setStatus(TaskStatus.QUEUED.name());
         task.setProgress(0);
         task.setStage("排队中");
+        task.setRetryCount(0);
         task.setTotalDiffCount(0);
         task.setHighCount(0);
         task.setMiddleCount(0);
@@ -248,9 +255,43 @@ public class TaskService {
             queueService.markStatus(taskId, TaskStatus.SUCCESS.name(), 100, "校验完成");
         } catch (Exception e) {
             log.error("校验任务失败 {}", taskId, e);
-            CheckTask failed = taskMapper.selectById(taskId);
-            failTask(failed == null ? task : failed, truncate(e.getMessage(), 1800), 100, "校验失败");
-            queueService.markStatus(taskId, TaskStatus.FAILED.name(), 100, "校验失败");
+            CheckTask current = taskMapper.selectById(taskId);
+            CheckTask effective = current == null ? task : current;
+            int retried = effective.getRetryCount() == null ? 0 : effective.getRetryCount();
+            boolean retryable = isRetryable(e);
+            if (retryable && retried < maxRetries) {
+                int next = retried + 1;
+                CheckTask retry = new CheckTask();
+                retry.setId(taskId);
+                retry.setStatus(TaskStatus.QUEUED.name());
+                retry.setProgress(0);
+                retry.setStage("第 " + next + " 次重试排队");
+                retry.setRetryCount(next);
+                retry.setErrorMessage(truncate(e.getMessage(), 1800));
+                retry.setUpdatedAt(LocalDateTime.now());
+                taskMapper.updateById(retry);
+                try {
+                    queueService.enqueue(taskId);
+                    queueService.markStatus(taskId, TaskStatus.QUEUED.name(), 0, retry.getStage());
+                    log.warn("任务 {} 第 {} 次重试入队: {}", taskId, next, e.getMessage());
+                } catch (RuntimeException enqueueError) {
+                    log.error("任务 {} 重试入队失败", taskId, enqueueError);
+                    failTask(effective, "重试入队失败: " + enqueueError.getMessage(), 100, "重试入队失败", TaskStatus.DEAD);
+                    queueService.deadLetter(taskId, "重试入队失败: " + enqueueError.getMessage());
+                }
+            } else {
+                boolean dead = retryable && retried >= maxRetries;
+                String message = dead
+                        ? "任务重试 " + retried + " 次后仍失败: " + e.getMessage()
+                        : truncate(e.getMessage(), 1800);
+                failTask(effective, truncate(message, 1800), 100, dead ? "重试耗尽" : "校验失败",
+                        dead ? TaskStatus.DEAD : TaskStatus.FAILED);
+                if (dead) {
+                    queueService.deadLetter(taskId, message);
+                }
+                queueService.markStatus(taskId, dead ? TaskStatus.DEAD.name() : TaskStatus.FAILED.name(),
+                        100, dead ? "重试耗尽" : "校验失败");
+            }
         } finally {
             queueService.ack(taskId);
         }
@@ -357,10 +398,44 @@ public class TaskService {
         });
     }
 
+    /** 只重试基础设施类故障；参数/权限/文件不存在等业务错误不应重试。 */
+    private boolean isRetryable(Throwable error) {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 8; depth++, current = current.getCause()) {
+            if (current instanceof BizException biz) {
+                if (biz.getCode() == 502 || biz.getCode() == 503 || biz.getCode() == 504) {
+                    return true;
+                }
+                if (biz.getCode() >= 400 && biz.getCode() < 500) {
+                    return false;
+                }
+            }
+            if (current instanceof java.io.IOException
+                    || current instanceof java.util.concurrent.TimeoutException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("timeout") || lower.contains("timed out")
+                        || lower.contains("429") || lower.contains("502")
+                        || lower.contains("503") || lower.contains("504")
+                        || lower.contains("connection reset") || lower.contains("temporarily")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void failTask(CheckTask task, String message, int progress, String stage) {
+        failTask(task, message, progress, stage, TaskStatus.FAILED);
+    }
+
+    private void failTask(CheckTask task, String message, int progress, String stage, TaskStatus status) {
         CheckTask failed = new CheckTask();
         failed.setId(task.getId());
-        failed.setStatus(TaskStatus.FAILED.name());
+        failed.setStatus(status.name());
         failed.setProgress(progress);
         failed.setStage(stage);
         failed.setErrorMessage(truncate(message, 2000));

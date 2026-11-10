@@ -33,7 +33,7 @@
     </div>
 
     <el-alert
-      v-if="status === 'FAILED' && errorMessage"
+      v-if="(status === 'FAILED' || status === 'DEAD') && errorMessage"
       class="error-box"
       type="error"
       :closable="false"
@@ -64,13 +64,13 @@ const props = defineProps({
 const steps = ['任务排队', '解析文档', '智能比对', '生成报告']
 
 const statusKey = computed(() => {
-  return ['QUEUED', 'RUNNING', 'SUCCESS', 'FAILED'].includes(props.status) ? props.status : 'QUEUED'
+  return ['QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', 'DEAD'].includes(props.status) ? props.status : 'QUEUED'
 })
 
 const statusInfo = computed(() => statusMeta(props.status))
 
 const safeProgress = computed(() => {
-  if (props.status === 'SUCCESS') return 100
+  if (props.status === 'SUCCESS' || props.status === 'DEAD') return 100
   const value = Number(props.progress) || 0
   return Math.max(1, Math.min(99, value))
 })
@@ -78,6 +78,7 @@ const safeProgress = computed(() => {
 const currentStep = computed(() => {
   if (props.status === 'SUCCESS') return 4
   if (props.status === 'FAILED') return Math.min(3, Math.floor(safeProgress.value / 30))
+  if (props.status === 'DEAD') return 5
   if (props.status === 'QUEUED') return 0
   if (safeProgress.value < 32) return 1
   if (safeProgress.value < 78) return 2
@@ -88,6 +89,7 @@ const defaultStage = computed(() => {
   if (props.status === 'QUEUED') return '等待校验工作进程领取任务'
   if (props.status === 'SUCCESS') return '全部校验步骤已完成'
   if (props.status === 'FAILED') return '任务执行中断'
+  if (props.status === 'DEAD') return '任务已终止，请查看失败原因'
   return '正在处理中'
 })
 </script>
@@ -122,7 +124,7 @@ const defaultStage = computed(() => {
 
 .status-dot.RUNNING { background: #d97706; box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.14); animation: pulse 1.4s infinite; }
 .status-dot.SUCCESS { background: #0f9f8f; box-shadow: 0 0 0 4px rgba(15, 159, 143, 0.12); }
-.status-dot.FAILED { background: #dc2626; box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.12); }
+.status-dot.FAILED, .status-dot.DEAD { background: #dc2626; box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.12); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -148,7 +150,7 @@ const defaultStage = computed(() => {
 
 .percent small { font-size: 12px; font-weight: 600; margin-left: 2px; }
 .percent.SUCCESS { color: var(--dc-teal); }
-.percent.FAILED { color: var(--dc-danger); }
+.percent.FAILED, .percent.DEAD { color: var(--dc-danger); }
 
 .track {
   position: relative;
@@ -167,7 +169,7 @@ const defaultStage = computed(() => {
 }
 
 .fill.SUCCESS { background: linear-gradient(90deg, #0f9f8f, #2dd4bf); }
-.fill.FAILED { background: linear-gradient(90deg, #dc2626, #f87171); }
+.fill.FAILED, .fill.DEAD { background: linear-gradient(90deg, #991b1b, #ef4444); }
 
 .shine {
   position: absolute;

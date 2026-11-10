@@ -43,6 +43,7 @@ public class TemplateService {
     private final StorageService storageService;
     private final DocxParser docxParser;
     private final ObjectMapper objectMapper;
+    private final DocxSecurityValidator securityValidator;
 
     public PageResult<TemplateVO> list(long page, long size, String scope, String keyword) {
         LambdaQueryWrapper<DocTemplate> query = Wrappers.<DocTemplate>lambdaQuery();
@@ -75,6 +76,7 @@ public class TemplateService {
      */
     public TemplateVO create(MultipartFile file, String name, String description, String category, String scope) {
         validateDocx(file);
+        securityValidator.validate(file);
         String actualScope = StringUtils.hasText(scope) ? scope.toUpperCase(Locale.ROOT) : "PERSONAL";
         if (!TemplateScope.isValid(actualScope)) {
             throw new BizException(400, "模板范围只能是 PUBLIC 或 PERSONAL");
@@ -103,7 +105,7 @@ public class TemplateService {
         template.setFileHash(stored.sha256());
         template.setContentType(stored.contentType());
         template.setParseStatus("PENDING");
-        template.setMetadataVersion(3);
+        template.setMetadataVersion(6);
         template.setDownloadCount(0);
         template.setCreatedAt(LocalDateTime.now());
         template.setUpdatedAt(LocalDateTime.now());
@@ -114,6 +116,7 @@ public class TemplateService {
             template.setMetadataJson(objectMapper.writeValueAsString(meta));
             template.setParseStatus("SUCCESS");
             template.setParseMessage("预解析完成");
+            template.setMetadataVersion(meta.getMetadataVersion() == null ? 6 : meta.getMetadataVersion());
         } catch (Exception e) {
             log.warn("模板预解析失败: {}", stored.originalName(), e);
             template.setParseStatus("FAILED");

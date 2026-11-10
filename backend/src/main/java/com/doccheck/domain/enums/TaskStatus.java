@@ -4,7 +4,8 @@ public enum TaskStatus {
     QUEUED("排队中"),
     RUNNING("处理中"),
     SUCCESS("校验成功"),
-    FAILED("校验失败");
+    FAILED("校验失败"),
+    DEAD("已终止");
 
     private final String label;
 
@@ -17,7 +18,7 @@ public enum TaskStatus {
     }
 
     public static boolean isTerminal(String status) {
-        return SUCCESS.name().equals(status) || FAILED.name().equals(status);
+        return SUCCESS.name().equals(status) || FAILED.name().equals(status) || DEAD.name().equals(status);
     }
 
     public static TaskStatus parse(String value) {

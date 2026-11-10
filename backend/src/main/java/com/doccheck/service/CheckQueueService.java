@@ -31,6 +31,7 @@ public class CheckQueueService {
 
     public static final String QUEUE_KEY = "doccheck:queue";
     public static final String PROCESSING_KEY = "doccheck:queue:processing";
+    public static final String DEAD_KEY = "doccheck:queue:dead";
     public static final String PROGRESS_KEY_PREFIX = "doccheck:task:progress:";
 
     private final StringRedisTemplate redisTemplate;
@@ -58,6 +59,18 @@ public class CheckQueueService {
 
     public void ack(Long taskId) {
         redisTemplate.opsForList().remove(PROCESSING_KEY, 1, String.valueOf(taskId));
+    }
+
+    /** 无法重试的任务写入死信列表，保留现场供人工排查；最多保留 1000 条。 */
+    public void deadLetter(Long taskId, String reason) {
+        String payload = taskId + "|" + System.currentTimeMillis() + "|"
+                + (reason == null ? "" : reason.replace('\n', ' '));
+        redisTemplate.opsForList().leftPush(DEAD_KEY, payload);
+        redisTemplate.opsForList().trim(DEAD_KEY, 0, 999);
+    }
+
+    public Long deadLetterSize() {
+        return redisTemplate.opsForList().size(DEAD_KEY);
     }
 
     /** 启动时恢复 processing 列表，避免进程崩溃后任务永久停留在「处理中」。 */

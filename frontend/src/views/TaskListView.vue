@@ -88,7 +88,9 @@
               <span class="dc-middle" title="中危">{{ row.middleCount || 0 }}</span>
               <span class="dc-low" title="低危">{{ row.lowCount || 0 }}</span>
             </div>
-            <span v-else-if="row.status === 'FAILED'" class="fail-text">执行失败</span>
+            <span v-else-if="row.status === 'FAILED' || row.status === 'DEAD'" class="fail-text">
+              {{ row.status === 'DEAD' ? '已终止' : '执行失败' }}
+            </span>
             <span v-else class="dc-muted">—</span>
           </template>
         </el-table-column>
@@ -154,7 +156,8 @@ const statusTabs = [
   { label: '排队中', value: 'QUEUED' },
   { label: '处理中', value: 'RUNNING' },
   { label: '成功', value: 'SUCCESS' },
-  { label: '失败', value: 'FAILED' }
+  { label: '失败', value: 'FAILED' },
+  { label: '已终止', value: 'DEAD' }
 ]
 
 const hasRunning = computed(() => items.value.some(i => i.status === 'QUEUED' || i.status === 'RUNNING'))
@@ -246,7 +249,7 @@ onUnmounted(() => {
 .tab-dot.QUEUED { background: #94a3b8; }
 .tab-dot.RUNNING { background: #d97706; }
 .tab-dot.SUCCESS { background: #0f9f8f; }
-.tab-dot.FAILED { background: #dc2626; }
+.tab-dot.FAILED, .tab-dot.DEAD { background: #991b1b; }
 .status-tab.active .tab-dot { box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.16); }
 
 .status-live {
@@ -334,7 +337,7 @@ onUnmounted(() => {
 .status-pill.queued { background: #f1f5f9; color: #64748b; }
 .status-pill.running { background: #fffbeb; color: #b45309; }
 .status-pill.success { background: #ecfdf5; color: #0f766e; }
-.status-pill.failed { background: #fef2f2; color: #b91c1c; }
+.status-pill.failed, .status-pill.dead { background: #fef2f2; color: #991b1b; }
 
 .mini-progress {
   width: 72px;
