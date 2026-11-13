@@ -4,6 +4,8 @@
 
 > 当前仓库中的后端已通过 `mvn package`，前端已通过 `npm run build`，并使用示例 DOCX 完成注册、登录、个人中心、模板上传解析、异步任务、差异查询、模板下载的本地端到端冒烟。
 
+> **公开仓库提示**：仓库内默认账号 `admin / admin123`、数据库默认密码 `doccheck123` 和 `root123456` 仅用于本地演示。部署到公网前，请通过 `.env` / 环境变量修改，并阅读 [SECURITY.md](SECURITY.md)。
+
 ---
 
 ## 1. 功能概览
@@ -195,6 +197,8 @@ FLUSH PRIVILEGES;
 项目默认使用 `doccheck / doccheck123`，不会使用 root 连接。若端口不是 3306，设置 `MYSQL_PORT`。
 
 ### 6.2 启动后端
+
+准备环境变量时，可参考根目录的 `.env.example`。Spring Boot 不会自动读取 `.env` 文件，请把变量导出到当前 shell，或在启动容器/进程时显式传入。
 
 ```bash
 cd backend
@@ -1026,7 +1030,7 @@ History 路由需要服务端回退到 `index.html`，参见第 6.4 节 Nginx �
 
 ## 附录：完整源码文件清单
 
-以下路径均相对于项目根目录 `D:\文档检测项目`。
+以下路径均相对于项目根目录。
 
 ```text
 .gitignore
@@ -1175,3 +1179,9 @@ frontend/src/views/TaskListView.vue
 frontend/src/views/TemplateManageView.vue
 frontend/vite.config.js
 ```
+
+## 12. License
+
+本项目基于 [MIT License](LICENSE) 开源。示例文档与本地测试数据不包含在仓库中。
+
+贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。

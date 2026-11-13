@@ -12,6 +12,9 @@ frontend/.vite/
 *.local
 
 # ---------- Runtime ----------
+.env
+.env.*
+!.env.example
 backend/data/
 logs/
 *.log
